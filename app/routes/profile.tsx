@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState } from "react";
-import { useLoaderData, useRevalidator, useNavigate } from "react-router";
+import { useLoaderData, useNavigate } from "react-router";
 import type { Route } from "./+types/profile";
 import { validateEnv } from "../utils/env";
 import {
@@ -114,7 +114,16 @@ export default function Profile() {
     const contributions = isContributions(loaderResult)
         ? loaderResult
         : undefined;
-    const weeks: Week[] = contributions?.weeks || [];
+
+    // Optimistic contributions: applied immediately after a successful submit
+    // so the calendar reflects new commits without waiting for the GitHub API
+    // propagation delay on revalidation.
+    const [optimisticContributions, setOptimisticContributions] = useState<
+        Contributions | undefined
+    >(undefined);
+
+    const displayContributions = optimisticContributions ?? contributions;
+    const weeks: Week[] = displayContributions?.weeks || [];
 
     // State
     const [selectedDates, setSelectedDates] = useState<SelectedDate[]>([]);
@@ -130,7 +139,6 @@ export default function Profile() {
     );
 
     const navigate = useNavigate();
-    const { revalidate } = useRevalidator();
 
     // Memoized handlers
     const handleSquareClick = useCallback((date: string) => {
@@ -157,9 +165,12 @@ export default function Profile() {
         setProgress(null);
         setActionResult(undefined);
 
+        // Capture current selected dates for the optimistic update
+        const submittedDates = selectedDates;
+
         try {
             const formData = new FormData();
-            formData.set("selectedDates", JSON.stringify(selectedDates));
+            formData.set("selectedDates", JSON.stringify(submittedDates));
 
             const response = await fetch("/api/commits", {
                 method: "POST",
@@ -192,12 +203,44 @@ export default function Profile() {
                                 date: event.date,
                             });
                         } else if (event.type === "done") {
+                            // Apply optimistic update so the calendar immediately
+                            // reflects the new commits (GitHub API has propagation delay).
+                            setOptimisticContributions((prev) => {
+                                const base = prev ?? contributions;
+                                if (!base) return prev;
+                                const addedTotal = submittedDates.reduce(
+                                    (sum, d) => sum + d.intensity,
+                                    0,
+                                );
+                                return {
+                                    totalContributions:
+                                        base.totalContributions + addedTotal,
+                                    weeks: base.weeks.map((week) => ({
+                                        ...week,
+                                        contributionDays:
+                                            week.contributionDays.map((day) => {
+                                                const submitted =
+                                                    submittedDates.find(
+                                                        (d) =>
+                                                            d.date === day.date,
+                                                    );
+                                                return submitted
+                                                    ? {
+                                                          ...day,
+                                                          contributionCount:
+                                                              day.contributionCount +
+                                                              submitted.intensity,
+                                                      }
+                                                    : day;
+                                            }),
+                                    })),
+                                };
+                            });
                             setActionResult({
                                 ok: true,
                                 message: event.message,
                             });
                             setSelectedDates([]);
-                            revalidate();
                         } else if (event.type === "error") {
                             setActionResult({ ok: false, error: event.error });
                         }
@@ -220,7 +263,7 @@ export default function Profile() {
             setIsSubmitting(false);
             setProgress(null);
         }
-    }, [selectedDates, revalidate]);
+    }, [selectedDates, contributions]);
 
     const handleCancel = useCallback(() => {
         setShowConfirm(false);
@@ -272,8 +315,10 @@ export default function Profile() {
 
                 <h1 className="text-3xl font-extrabold mb-6 text-white tracking-tight text-center font-display">
                     GitHub Contributions :{" "}
-                    {contributions ? contributions.totalContributions : 0} in
-                    the last year
+                    {displayContributions
+                        ? displayContributions.totalContributions
+                        : 0}{" "}
+                    in the last year
                 </h1>
 
                 <p className="mb-4 text-lg text-white text-center font-display">
